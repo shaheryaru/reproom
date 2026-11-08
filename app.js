@@ -21,7 +21,10 @@ function load() {
   try { return Object.assign(defaults(), JSON.parse(localStorage.getItem(KEY)) || {}); }
   catch { return defaults(); }
 }
-function save() { localStorage.setItem(KEY, JSON.stringify(db)); }
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify(db)); return true; }
+  catch { toast('Could not save on this device. Free some space and try again.'); return false; }
+}
 
 // ---------- Helpers ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -47,7 +50,8 @@ function toast(msg) {
 }
 const ICON = {
   trash: '<svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>',
-  x: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>'
+  x: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+  edit: '<svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"/></svg>'
 };
 
 // ---------- Calculations ----------
@@ -255,49 +259,119 @@ const defaultName = ex => ex.length === 1 ? ex[0].name : `${ex[0].name} + ${ex.l
 
 // ---------- Food ----------
 const MEALS = ['Breakfast', 'Lunch', 'Dinner', 'Snack'];
+let editingId = null;
 const guessMeal = () => { const h = new Date().getHours(); return h < 11 ? 'Breakfast' : h < 16 ? 'Lunch' : h < 21 ? 'Dinner' : 'Snack'; };
+// null = blank, undefined = not a usable amount. Calories are whole numbers so the row matches the daily total.
+function parseAmount(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (s === '') return null;
+  if (!/^\d{1,5}(\.\d{1,2})?$/.test(s)) return undefined;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : undefined;
+}
+function foodProblems(name, kcalRaw, proteinRaw) {
+  const problems = [];
+  if (!name) problems.push('Enter a food name.');
+  else if (name.length > 80) problems.push('Use a food name of 80 characters or fewer.');
+  const kcal = parseAmount(kcalRaw);
+  if (kcal === null) problems.push('Enter calories.');
+  else if (kcal === undefined || kcal > 20000) problems.push('Enter calories from 0 to 20,000.');
+  const protein = parseAmount(proteinRaw);
+  if (protein === undefined || (typeof protein === 'number' && protein > 1000)) problems.push('Enter protein in grams from 0 to 1,000, or leave it blank.');
+  return problems;
+}
+function foodRecord(name, kcalRaw, proteinRaw, meal) {
+  const protein = parseAmount(proteinRaw);
+  return { name, kcal: Math.round(parseAmount(kcalRaw)), protein: protein == null ? 0 : Math.round(protein), meal: meal || guessMeal() };
+}
 function viewFood() {
-  const d = foodDate, eaten = kcalOn(d), pct = db.goal ? eaten / db.goal * 100 : 0, items = foodsOn(d);
+  const d = foodDate;
+  let editing = editingId ? db.foods.find(f => f.id === editingId && f.date === d) : null;
+  if (editingId && !editing) editingId = null;
+  const eaten = kcalOn(d), pct = db.goal ? eaten / db.goal * 100 : 0, items = foodsOn(d);
   const recent = []; const seen = new Set();
   [...db.foods].reverse().forEach(f => { const k = f.name.toLowerCase(); if (!seen.has(k) && recent.length < 8) { seen.add(k); recent.push([f.name, f.kcal, f.protein]); } });
+  const mealNow = editing ? (editing.meal || guessMeal()) : guessMeal();
+  const meals = MEALS.includes(mealNow) ? MEALS : [mealNow, ...MEALS];
   return `<div class="page-head"><h1>Food</h1><p class="muted">Log what you eat and track your daily calorie goal.</p></div>
     <div class="row between card" style="padding:8px">
       <button class="icon-btn" id="prevD" aria-label="Previous day"><svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg></button>
-      <b>${niceDate(d)}</b>
+      <b id="foodDay">${niceDate(d)}</b>
       <button class="icon-btn" id="nextD" aria-label="Next day" ${d >= today() ? 'disabled style="opacity:.3"' : ''}><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></button></div>
-    <section class="card"><div class="row between" style="margin-bottom:8px"><b>${fmt(eaten)} / ${fmt(db.goal)} kcal</b>
-      <span class="muted">${eaten > db.goal ? fmt(eaten - db.goal) + ' over' : fmt(db.goal - eaten) + ' left'}</span></div>
-      <div class="bar ${eaten > db.goal ? 'over' : ''}"><i style="width:${Math.min(100, pct)}%"></i></div>
-      <p class="muted small" style="margin-top:8px">Protein: ${fmt(proteinOn(d))} / ${fmt(db.proteinGoal)} g</p></section>
-    <section class="card"><h2>Add food</h2>
-      <form id="foodForm" autocomplete="off">
-        <div class="field"><label for="fName">Food</label><input id="fName" required placeholder="e.g. Chicken wrap"></div>
-        <div class="grid2"><div class="field"><label for="fKcal">Calories</label><input id="fKcal" type="number" inputmode="numeric" min="0" required placeholder="kcal"></div>
-        <div class="field"><label for="fProt">Protein (g)</label><input id="fProt" type="number" inputmode="decimal" min="0" placeholder="optional"></div></div>
-        <div class="field"><label for="fMeal">Meal</label><select id="fMeal">${MEALS.map(m => `<option ${m === guessMeal() ? 'selected' : ''}>${m}</option>`).join('')}</select></div>
-        <button class="btn block" type="submit">Add</button>
+    <section class="card"><div class="row between" style="margin-bottom:8px"><b id="dayTotal">${fmt(eaten)} / ${fmt(db.goal)} kcal</b>
+      <span class="muted" id="dayRemain">${eaten > db.goal ? fmt(eaten - db.goal) + ' over' : fmt(db.goal - eaten) + ' left'}</span></div>
+      <div class="bar ${eaten > db.goal ? 'over' : ''}" aria-hidden="true"><i style="width:${Math.min(100, pct)}%"></i></div>
+      <p class="muted small" id="dayProtein" style="margin-top:8px">Protein: ${fmt(proteinOn(d))} / ${fmt(db.proteinGoal)} g</p></section>
+    <section class="card"><h2 id="foodFormTitle">${editing ? 'Edit food' : 'Add food'}</h2>
+      <form id="foodForm" autocomplete="off" novalidate>
+        <p id="foodError" class="form-error" role="alert" hidden></p>
+        <div class="field"><label for="fName">Food</label><input id="fName" maxlength="80" placeholder="e.g. Chicken wrap" aria-describedby="foodError" value="${editing ? esc(editing.name) : ''}"></div>
+        <div class="grid2"><div class="field"><label for="fKcal">Calories</label><input id="fKcal" type="number" inputmode="numeric" min="0" max="20000" step="1" placeholder="kcal" aria-describedby="foodError" value="${editing ? esc(editing.kcal) : ''}"></div>
+        <div class="field"><label for="fProt">Protein (g)</label><input id="fProt" type="number" inputmode="decimal" min="0" max="1000" step="1" placeholder="optional" aria-describedby="foodError" value="${editing && num(editing.protein) ? esc(editing.protein) : ''}"></div></div>
+        <div class="field"><label for="fMeal">Meal</label><select id="fMeal">${meals.map(m => `<option ${m === mealNow ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select></div>
+        ${editing
+          ? '<div class="grid2"><button class="btn ghost" type="button" id="cancelFood">Cancel</button><button class="btn" type="submit" id="foodSubmit">Save changes</button></div>'
+          : '<button class="btn block" type="submit" id="foodSubmit">Add</button>'}
       </form>
       ${recent.length ? `<p class="muted small" style="margin:14px 0 8px">Recent: tap to add again</p><div class="chips">${recent.map(chip).join('')}</div>` : ''}
       <p class="muted small" style="margin:14px 0 8px">Quick add (approximate)</p><div class="chips">${QUICK_FOODS.map(chip).join('')}</div>
     </section>
     <section class="card"><h2>${niceDate(d)}'s log</h2>
-      ${items.length ? MEALS.filter(m => items.some(f => f.meal === m)).map(m => {
-        const list = items.filter(f => f.meal === m);
-        return `<div class="row between" style="margin:10px 0 2px"><b>${m}</b><span class="muted small">${fmt(list.reduce((a, f) => a + num(f.kcal), 0))} kcal</span></div>
-          <ul class="list">${list.map(f => `<li><div class="grow"><div class="name">${esc(f.name)}</div>${num(f.protein) ? `<div class="muted small">${fmt(f.protein)} g protein</div>` : ''}</div>
-          <b>${fmt(f.kcal)}</b><button class="icon-btn" data-delf="${f.id}" aria-label="Delete ${esc(f.name)}">${ICON.trash}</button></li>`).join('')}</ul>`; }).join('')
+      ${items.length ? MEALS.filter(m => items.some(f => (f.meal || 'Snack') === m)).concat(items.some(f => !MEALS.includes(f.meal || 'Snack')) ? ['Other'] : []).map(m => {
+        const list = items.filter(f => m === 'Other' ? !MEALS.includes(f.meal || 'Snack') : (f.meal || 'Snack') === m);
+        if (!list.length) return '';
+        return `<div class="row between" style="margin:10px 0 2px"><b>${esc(m)}</b><span class="muted small">${fmt(list.reduce((a, f) => a + num(f.kcal), 0))} kcal</span></div>
+          <ul class="list">${list.map(f => `<li class="${editing && editing.id === f.id ? 'is-editing' : ''}"><div class="grow"><div class="name">${esc(f.name)}</div>${num(f.protein) ? `<div class="muted small">${fmt(f.protein)} g protein</div>` : ''}</div>
+          <b>${fmt(f.kcal)}</b><span class="food-actions"><button class="icon-btn" type="button" data-editf="${f.id}" aria-label="${editing && editing.id === f.id ? 'Editing' : 'Edit'} ${esc(f.name)}">${ICON.edit}</button>
+          <button class="icon-btn" type="button" data-delf="${f.id}" aria-label="Delete ${esc(f.name)}">${ICON.trash}</button></span></li>`).join('')}</ul>`; }).join('')
       : '<div class="empty">Nothing logged for this day yet.</div>'}
     </section>`;
 }
 const chip = ([n, k, p]) => `<button class="chip" data-n="${esc(n)}" data-k="${k}" data-p="${p || 0}">${esc(n)} · ${fmt(k)}</button>`;
 bind.food = () => {
-  const add = (name, kcal, protein, meal) => { db.foods.push({ id: uid(), date: foodDate, name, kcal: num(kcal), protein: num(protein), meal: meal || guessMeal() }); save(); render(); toast(`Added ${name}`); };
-  $('#foodForm').onsubmit = e => { e.preventDefault(); const n = $('#fName').value.trim(), k = $('#fKcal').value;
-    if (!n || k === '') return; add(n, k, $('#fProt').value, $('#fMeal').value); };
+  const showFoodError = (msg, focusId) => {
+    const el = $('#foodError'); if (!el) return;
+    el.hidden = !msg; el.textContent = msg || '';
+    ['fName', 'fKcal', 'fProt'].forEach(id => { const input = $('#' + id); if (input) input.removeAttribute('aria-invalid'); });
+    if (focusId) { const input = $('#' + focusId); if (input) { input.setAttribute('aria-invalid', 'true'); input.focus(); } }
+  };
+  const commitFood = message => { const ok = save(); render(); if (ok) toast(message); };
+  const add = (name, kcal, protein, meal) => {
+    const problems = foodProblems(String(name || '').trim(), kcal, protein);
+    if (problems.length) { showFoodError(problems.join(' '), 'fName'); return; }
+    db.foods.push({ id: uid(), date: foodDate, ...foodRecord(String(name).trim(), kcal, protein, meal) });
+    commitFood('Added ' + name);
+  };
+  $('#foodForm').onsubmit = e => {
+    e.preventDefault();
+    const name = $('#fName').value.trim(), kcalRaw = $('#fKcal').value, proteinRaw = $('#fProt').value, meal = $('#fMeal').value;
+    const problems = foodProblems(name, kcalRaw, proteinRaw);
+    if (problems.length) {
+      const kcal = parseAmount(kcalRaw);
+      const focusId = !name ? 'fName' : (kcal === null || kcal === undefined || kcal > 20000) ? 'fKcal' : 'fProt';
+      showFoodError(problems.join(' '), focusId);
+      return;
+    }
+    const rec = foodRecord(name, kcalRaw, proteinRaw, meal);
+    const editing = editingId ? db.foods.find(f => f.id === editingId && f.date === foodDate) : null;
+    if (editing) { Object.assign(editing, rec); editingId = null; commitFood('Food updated'); }
+    else { db.foods.push({ id: uid(), date: foodDate, ...rec }); commitFood('Added ' + name); }
+  };
   $$('.chip[data-k]').forEach(c => c.onclick = () => add(c.dataset.n, c.dataset.k, c.dataset.p, $('#fMeal').value));
-  $$('[data-delf]').forEach(b => b.onclick = () => { db.foods = db.foods.filter(f => f.id !== b.dataset.delf); save(); render(); toast('Removed'); });
-  $('#prevD').onclick = () => { foodDate = addDays(foodDate, -1); render(); };
-  $('#nextD').onclick = () => { if (foodDate < today()) { foodDate = addDays(foodDate, 1); render(); } };
+  $$('[data-editf]').forEach(b => b.onclick = () => {
+    editingId = b.dataset.editf; render();
+    const name = $('#fName'); if (name) { name.focus(); name.select(); }
+    const title = $('#foodFormTitle'); if (title) title.scrollIntoView({ block: 'center' });
+  });
+  $$('[data-delf]').forEach(b => b.onclick = () => {
+    if (editingId === b.dataset.delf) editingId = null;
+    db.foods = db.foods.filter(f => f.id !== b.dataset.delf);
+    commitFood('Removed');
+  });
+  const cancel = $('#cancelFood'); if (cancel) cancel.onclick = () => { editingId = null; render(); };
+  $('#prevD').onclick = () => { editingId = null; foodDate = addDays(foodDate, -1); render(); };
+  $('#nextD').onclick = () => { if (foodDate < today()) { editingId = null; foodDate = addDays(foodDate, 1); render(); } };
 };
 
 // ---------- Summary ----------
@@ -422,4 +496,18 @@ bind.settings = () => {
 // ---------- Start ----------
 $('#exercise-list').innerHTML = EXERCISES.map(e => `<option value="${e}">`).join('');
 render();
-if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+if ('serviceWorker' in navigator) {
+  // Reload only when an update takes over a page that was already running the app,
+  // so the first install does not refresh and a new shell does not stay half-updated.
+  let hadController = !!navigator.serviceWorker.controller, refreshing = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController) { hadController = true; return; }
+    if (refreshing) return;
+    refreshing = true;
+    location.reload();
+  });
+  window.addEventListener('load', () => {
+    const worker = new URL('sw.js', new URL('./', document.baseURI));
+    navigator.serviceWorker.register(worker.href).catch(() => {});
+  });
+}

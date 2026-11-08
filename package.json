@@ -1,0 +1,11 @@
+{
+  "name": "reproom",
+  "private": true,
+  "description": "Phone-first gym and calorie tracker",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.65.0"
+  }
+}
